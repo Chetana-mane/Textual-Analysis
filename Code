@@ -1,0 +1,488 @@
+---
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+## R 
+```{r}
+# Text Processing - Bag of Words and TF-IDF
+library(quanteda) # bag of words
+library(wordcloud) # BOW VISUAL
+library(dplyr) #trends
+library(tm) #corpus
+
+# Topic Modelling
+library(topicmodels)  # Latent Dirichlet Allocation (LDA)
+library(tidytext) #gamma matrix
+
+# Regression
+library(caret)     # Advanced regression techniques
+library(glmnet)    # For regularized regression
+library(textrecipes) # Machine learning models
+
+#classification and association
+library(e1071)        # classification model
+library(arules)        # Association analysis
+library(arulesViz)     #visualize assosiation
+
+# Clustering
+library(cluster)   # Basic clustering algorithms
+library(dbscan)    # DBSCAN clustering
+
+# PCA and Visualization
+library(ggplot2)   # Visualization
+library(stats)     # Basic statistical functions
+library(factoextra) # Visualization
+
+#generic
+library(dplyr)
+library(tidyr)
+library(Rtsne)
+
+```
+
+read csv
+```{r}
+# Read the CSV extract the header row
+journal_data <- read.csv("journal_data.csv", header = TRUE)
+
+journal_data$views <- as.integer(gsub(",", "", journal_data$views))
+journal_data$pages <- as.integer(gsub(",", "", journal_data$pages))
+journal_data$year <- as.integer(gsub(",", "", journal_data$year))
+journal_data$citations <- as.integer(gsub(",", "", journal_data$citations))
+journal_data$altmetric <- as.integer(gsub(",", "", journal_data$altmetric))
+journal_data$journal_numeric <-as.integer(factor(journal_data$journal))
+
+```
+total 8% na values
+```{r}
+# NA values in numeric columns
+colSums(is.na(journal_data))
+
+# Empty values in character columns
+empty_counts <- numeric(length = ncol(journal_data))
+
+for (i in seq_along(journal_data)) {
+  if (is.character(journal_data[[i]])) {
+    count_empty <- sum(nchar(journal_data[[i]]) == 0)
+    col_name <- names(journal_data)[i]
+    cat(col_name, "Count:", count_empty, "\n")
+    empty_counts[i] <- count_empty
+  }
+}
+```
+clean csv
+```{r}
+# Filter out rows with empty values in 'abstract' column and without NA in other character columns
+journal_data <- journal_data[journal_data$abstract != "" & complete.cases(journal_data[, !colnames(journal_data) %in% "abstract"]), ]
+
+# Display dimensions of  cleaned dataset
+cat("Dimensions of cleaned dataset:", nrow(journal_data), "rows and", ncol(journal_data), "columns")
+
+```
+outlier handling
+```{r}
+# Set the percentile for capping outliers 
+percentile_value <- 95
+
+# Calculate the 95th percentile values 
+citations_95th <- quantile(journal_data$citations, probs = percentile_value / 100)
+views_95th <- quantile(journal_data$views, probs = percentile_value / 100)
+
+# Cap the extreme values
+journal_data$citations <- pmin(journal_data$citations, citations_95th)
+journal_data$views <- pmin(journal_data$views, views_95th )
+
+```
+
+cleaning abstract column
+```{r}
+preprocess_text <- function(text) {
+   corp <- corpus(text)
+  
+  # Perform text preprocessing
+  corp <- tokens(corp) %>%
+    tokens_tolower() %>%           # Convert to lowercase
+    tokens_remove(pattern = "\\p{P}") %>%   # Remove punctuation
+    tokens_remove(pattern = "\\d+") %>%    # Remove numbers
+    tokens_remove(stopwords("en"))     # Remove stopwords                   
+
+ # Remove shorter words and numeric values
+  corp <- tokens_select(corp, min_nchar = 4, padding = TRUE)
+  
+  # Convert processed tokens back to text
+  processed_text <- sapply(corp, paste, collapse = " ")
+  
+  return(processed_text)
+}
+
+# Apply preprocessing to abstract data
+journal_data$clean_abstract <- preprocess_text(journal_data$abstract)
+
+```
+
+bof words and tfidf
+```{r}
+# Corpus
+corpus <- Corpus(VectorSource(journal_data$clean_abstract))
+
+# Bag of Words
+dtm <- DocumentTermMatrix(corpus)
+bow_matrix <- as.matrix(dtm)
+
+# TF-IDF
+tfidf_transformer <- weightTfIdf(dtm)
+tfidf_matrix <- as.matrix(tfidf_transformer)
+
+# Add BoW and TF-IDF features to dataset
+journal_data$dtm_bow <- rowSums(bow_matrix)
+journal_data$dtm_tfidf <- rowSums(tfidf_matrix)
+
+# Find word frequency
+word_freq <- colSums(bow_matrix)
+
+# data frame with words and frequencies
+word_freq_df <- data.frame(word = names(word_freq), frequency = word_freq)
+word_freq_df <- word_freq_df[order(-word_freq_df$frequency), ]  # Sort by frequency
+
+# Plotting word cloud
+set.seed(1234)
+wordcloud(words = word_freq_df$word, freq = word_freq_df$frequency, max.words = 50, min.freq = 500, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+
+```
+
+Trend by year
+```{r}
+# Aggregate data by year and calculate frequency counts for all the numeric columns by year
+aggregated_data <- journal_data %>%
+  group_by(year) %>%
+  summarise(
+    views = n_distinct(views),
+    citations = n_distinct(citations),
+    altmetric = n_distinct(altmetric),
+    pages = n_distinct(pages),
+    dtm_bow = n_distinct(dtm_bow),
+    dtm_tfidf = n_distinct(dtm_tfidf)
+    ) %>%
+  pivot_longer(cols = -year, names_to = "variable", values_to = "value")
+
+# Plot line graphs 
+line_plot <- ggplot(aggregated_data, aes(x = year, y = value, color = variable)) +
+  geom_line() +
+  labs(title = "Frequency of Various Variables by Year",
+       x = "Year",
+       y = "Frequency") +
+  scale_color_manual(values = c("lightpink", "lightblue", "lightgreen", "lightgrey","cyan","purple")) +  # Colors for each line
+  theme_minimal()
+
+# Display 
+print(line_plot)
+```
+
+```{r}
+# Aggregate data by year and journal_numeric, calculate frequency counts for all numeric columns
+aggregated_data <- journal_data %>%
+  group_by(year, journal_numeric) %>%
+  summarise(
+    views_freq = n_distinct(views),
+    citations_freq = n_distinct(citations),
+    altmetric_freq = n_distinct(altmetric),
+    pages_freq = n_distinct(pages),
+    dtm_bow_freq = n_distinct(dtm_bow),
+    dtm_tfidf_freq = n_distinct(dtm_tfidf)
+  ) %>%
+  pivot_longer(cols = -c(year, journal_numeric), names_to = "variable", values_to = "value")
+
+#heatmap 
+heatmap_plot <- ggplot(aggregated_data, aes(x = year, y = as.factor(journal_numeric), fill = value)) +
+  geom_tile() +
+  facet_wrap(~variable, scales = "free", ncol = 3) +
+  labs(title = "Frequency of Various Variables by Year and Journal Numeric",
+       x = "Year",
+       y = "Journal Numeric",
+       fill = "Frequency") +
+  theme_minimal()
+
+# Display
+print(heatmap_plot)
+
+ 
+```
+assosiation analysis
+```{r include=FALSE}
+# Create a Corpus
+corpus <- Corpus(VectorSource(journal_data$clean_abstract))
+
+# Convert corpus to plain text format
+text_list <- lapply(corpus, as.character)
+
+# Combine text into single strings (documents)
+text_combined <- sapply(text_list, paste, collapse = " ")
+
+# Split the combined text into transactions by word
+transactions <- strsplit(text_combined, "\\s+")
+
+# Convert the list to transactions
+transactions <- as(transactions, "transactions")
+
+# Combine the 'journal_numeric' with 'clean_abstract' for association analysis
+data_for_association <- cbind(journal_data$journal_numeric, transactions)
+
+data_trans <- transactions(transactions)
+
+# Perform association rule mining (adjust parameters as needed)
+rules <- apriori(data_trans, parameter = list(support = 0.1, confidence = 0.5))
+
+```
+
+```{r}
+# plotting contains the association rules
+plot(rules, method = "graph")
+```
+
+lda 
+```{r message=FALSE}
+#  corpus by combining the titles and abstracts
+corpus <- Corpus(VectorSource(paste(journal_data$title, journal_data$clean_abstract, sep = " ")))
+
+# document-term matrix
+dtm <- DocumentTermMatrix(corpus, control = list(
+  tolower = TRUE,
+  removePunctuation = TRUE,
+  removeNumbers = TRUE,
+  stopwords = TRUE  # Add more steps based on your needs
+))
+
+# LDA (Latent Dirichlet Allocation)
+num_topics <- 10  # Set the number of topics to extract, adjust as needed
+lda_model <- LDA(dtm, k = num_topics, method = "Gibbs", control = list(seed = 123))
+
+#  top terms for each topic
+top_terms <- terms(lda_model, 10)  # Adjust the number of top terms as needed
+
+```
+naming lda
+```{r}
+# Define the list of labels 
+topic_labels <- c(
+  "Statistical Modeling",       
+  "Performance Analysis",       
+  "Research Methodologies",
+  "Optimization in Scheduling",
+  "Healthcare Services",       
+  "Problem-solving Algorithms",  
+  "Systems Modeling",            
+  "Decision Analysis",           
+  "Supply Chain Management",     
+  "Cost Modeling"             
+)
+
+
+# Display the updated topic labels 
+for (i in 1:num_topics) {
+  cat("Topic", i, ": ", topic_labels[i], "\n")
+  print(top_terms[, i], quote = FALSE)
+}
+
+```
+lda aS FEATURE
+```{r}
+# Extract gamma matrix (document-topic distribution)
+gamma_matrix <- as.data.frame(tidy(lda_model, matrix = "gamma"))
+
+# Convert 'document' column to numeric 
+gamma_matrix$document <- as.numeric(gamma_matrix$document)
+
+# filter the gamma values
+gamma_matrix_filtered <- gamma_matrix %>%
+  group_by(document) %>%
+  filter(gamma == max(gamma)) %>%
+  ungroup()
+
+# Remove duplicate values 
+gamma_matrix_filtered_unique <- gamma_matrix_filtered %>%
+  distinct(document, .keep_all = TRUE)
+
+#set as a feature for all
+journal_data$dominant_topic <- gamma_matrix_filtered_unique$topic
+```
+lda - visual
+```{r}
+# Aggregate data by year and dominant topic
+topic_data <- journal_data %>%
+  group_by(year, dominant_topic) %>%
+  summarise(topic_freq = n()) 
+
+# Convert 'year' to factor to ensure categorical scale
+topic_data$year <- as.factor(topic_data$year)
+
+# Plotting the bar chart
+bar_plot <- ggplot(topic_data, aes(x = year, y = topic_freq, fill = factor(dominant_topic))) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Frequency of Dominant Topics by Year",
+       x = "Year",
+       y = "Frequency",
+       fill = "Dominant Topic") +
+  scale_fill_brewer(palette = "Set3", labels = topic_labels) +  # Assign different colors and labels
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(bar_plot)
+
+```
+regression model
+```{r}
+# Split the data into training and testing sets
+set.seed(123)
+train_index <- sample(1:nrow(journal_data), 0.7 * nrow(journal_data))
+train_data <- journal_data[train_index, ]
+test_data <- journal_data[-train_index, ] 
+
+# Extract necessary columns 
+X_train <- train_data[, c('clean_abstract', 'title','journal')]
+y_train <- train_data$citations
+X_test <- test_data[, c('clean_abstract', 'title', 'journal')]
+y_test <- test_data$citations
+
+# Preprocessing for text data again
+text_prep <- recipe(citations ~ clean_abstract + title+ journal, data = train_data) %>%
+  step_tokenize(all_predictors()) %>%
+  step_tfidf(all_predictors()) %>%
+  prep()
+
+# Apply preprocessing to training and testing data
+X_train_tfidf <- bake(text_prep, new_data = train_data)
+X_test_tfidf <- bake(text_prep, new_data = test_data)
+
+```
+99% accuracy
+```{r}
+# Train the Elastic Net model using text features with adjusted alpha and lambda values
+enet_model_text <- cv.glmnet(as.matrix(X_train_tfidf), y_train, alpha = 0.1) # Adjust alpha
+best_lambda_text <- enet_model_text$lambda.1se # Using lambda.1se for more regularization
+
+# Predict on test data using the best lambda
+y_pred_text <- predict(enet_model_text, newx = as.matrix(X_test_tfidf), s = best_lambda_text)
+
+# Calculating evaluation metrics
+mse_text <- mean((y_pred_text - y_test)^2)
+rsquared_text <- cor(y_pred_text, y_test)^2
+
+# Displaying results
+cat("Best Lambda for Text Features:", best_lambda_text, "\n")
+cat("Mean Squared Error for Text Features:", mse_text, "\n")
+cat("R-squared for Text Features:", rsquared_text, "\n")
+
+# Scatterplot for predictions vs. actual values
+plot(y_test, y_pred_text,
+     xlab = "Actual Values", ylab = "Predicted Values",
+     main = "Elastic Net: Actual vs. Predicted (Text Features)")
+abline(0, 1, col = "red")  # Adding a diagonal line for comparison
+
+```
+classification model - 95 %
+```{r}
+# Prepare the data for modeling
+target_variable <- "journal_numeric"
+features <- c("dtm_tfidf","dtm_bow","year", "dominant_topic")
+
+# Split the data into training and testing sets
+set.seed(123)  # For reproducibility
+train_index <- sample(1:nrow(journal_data), 0.8 * nrow(journal_data))
+train_data <- journal_data[train_index, ]
+test_data <- journal_data[-train_index, ]
+
+```
+
+```{r}
+# Train a classification model (Naive Bayes)
+model <- naiveBayes(journal_numeric ~ ., data = train_data[, c(features, target_variable)])
+
+# Predict on the test set
+predictions <- predict(model, newdata = test_data[, c(features)])
+
+# Calculate accuracy
+actual_values <- test_data$journal_numeric
+accuracy <- mean(predictions == actual_values) 
+cat("Accuracy:", accuracy)
+
+
+# Scatterplot for predictions vs. actual values
+plot(actual_values, predictions,
+     xlab = "Actual Values", ylab = "Predicted Values",
+     main = "classification model on journal numeric")
+abline(0, 1, col = "red")  # Adding a diagonal line for comparison
+
+
+```
+
+dbscan cluster
+```{r}
+# Combine Box-Cox transformed columns
+selected_components <- cbind(journal_data$journal_numeric, journal_data$dominant_topic, journal_data$dtm_tfidf)
+
+# Perform DBSCAN Clustering
+dbscan_model <- dbscan(selected_components, eps = 0.5, MinPts = 10)
+dbscan_clusters <- dbscan_model$cluster
+
+# Count the occurrences of each cluster
+cluster_counts <- table(dbscan_clusters)
+
+# Convert the table into a data frame
+cluster_table <- data.frame(cluster = as.integer(names(cluster_counts)),
+                            datapoints = as.integer(cluster_counts))
+
+# Order the table by cluster number
+cluster_table <- cluster_table[order(cluster_table$cluster), ]
+
+ggplot(cluster_table, aes(x = cluster, y = datapoints, color = factor(cluster))) +
+  geom_point(size = 3) +
+  labs(title = "DBSCAN Clustering",
+       x = "Cluster",
+       y = "Datapoints") +
+  theme_minimal()
+
+```
+
+k- metroid cluster
+```{r}
+# Combine features for clustering
+features <- cbind(journal_data$views, journal_data$dominant_topic)  # Adjust these columns accordingly
+
+# Perform clustering using K-means
+num_clusters <- 5 # Specify the number of clusters
+set.seed(123)  # For reproducibility
+kmeans_result <- kmeans(features, centers = num_clusters)
+
+# Create a vector of cluster labels based on the cluster assignments
+cluster_labels <- ifelse(kmeans_result$cluster == 1, "least views (below 100)",
+                         ifelse(kmeans_result$cluster == 2, "low views",
+                                ifelse(kmeans_result$cluster == 3, "low moderate views",
+                                       ifelse(kmeans_result$cluster == 4, "moderate views",
+                                              ifelse(kmeans_result$cluster == 5, "most views (around 500)",
+                                                     "Other Clusters Label")))))
+
+# Add the cluster labels to the journal_data DataFrame
+journal_data$cluster_label <- cluster_labels
+
+# Perform PCA for dimensionality reduction
+pca_data <- prcomp(features, scale = TRUE)
+pca_df <- as.data.frame(pca_data$x[, 1:2])  # Select first two principal components
+colnames(pca_df) <- c("PC1", "PC2")  # Rename columns for clarity
+
+# Plot clusters using PCA
+ggplot(pca_df, aes(x = PC1, y = PC2, color = as.factor(kmeans_result$cluster))) +
+  geom_point() +
+  labs(title = "Clustering of Articles") +
+  theme_minimal()
+```
+
+csv last
+```{r}
+write.csv(journal_data, file = "clean_journal_data.csv", row.names = FALSE)
+summary(journal_data)
+```
+
